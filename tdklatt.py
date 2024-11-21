@@ -38,14 +38,15 @@ Examples:
 """
 
 try:
-    import math
     import numpy as np
     from scipy.signal import resample_poly
     from scipy.io.wavfile import write
     import simpleaudio as sa
+    import matplotlib.pyplot as plt
+    import warnings
 except ImportError:
     print("Missing one or more required modules.")
-    print("Please make sure that math, numpy, scipy, and simpleaudio are installed.")
+    print("Please make sure that numpy, scipy, matplotlib, and simpleaudio are installed.")
     import sys
     sys.exit()
 
@@ -74,7 +75,7 @@ def klatt_make(params=None):
     # Loop through all time-varying parameters, processing as needed
     for param in list(filter(lambda aname: not aname.startswith("_"),
                              dir(params))):
-        if param is "FF" or param is "BW":
+        if param == "FF" or param == "BW":
             synth.params[param] = \
                     [getattr(params, param)[i] for i in range(params.N_FORM)]
         else:
@@ -120,13 +121,15 @@ class KlattParam1980(object):
         Each of the above time-varying parameters is stored as an attribute in
             the form of a Numpy array.
     """
-    def __init__(self, FS=10000, N_FORM=5, DUR=1, F0=100,
-                       FF=[500, 1500, 2500, 3500, 4500],
-                       BW=[50, 100, 100, 200, 250],
+    def __init__(self, FS=10000, N_FORM=6, DUR=1, F0=100,
+                       FF=[500, 1500, 2500, 3500, 4500, 4900],
+                       BW=[50, 100, 100, 200, 250, 1000],
                        AV=60, AVS=0, AH=0, AF=0,
-                       SW=0, FGP=0, BGP=100, FGZ=1500, BGZ=6000,
-                       FNP=250, BNP=100, FNZ=250, BNZ=100, BGS=200,
-                       A1=0, A2=0, A3=0, A4=0, A5=0, A6=0, AN=0):
+                       SW=0,
+                       FGP=0, BGP=100, FGZ=1500, BGZ=6000, FNP=250,
+                       BNP=100, FNZ=250, BNZ=100, BGS=200,
+                       A1=0, A2=0, A3=0, A4=0, A5=0, A6=0,
+                       AB=0, AN=0):
         self.FS = FS
         self.DUR = DUR
         self.N_FORM = N_FORM
@@ -156,6 +159,7 @@ class KlattParam1980(object):
         self.A4 = np.ones(self.N_SAMP)*A4
         self.A5 = np.ones(self.N_SAMP)*A5
         self.A6 = np.ones(self.N_SAMP)*A6
+        self.AB = np.ones(self.N_SAMP)*AB
         self.AN = np.ones(self.N_SAMP)*AN
 
 
@@ -229,7 +233,7 @@ class KlattSynth(object):
                       "A2F", "A3F", "A4F", "A5F", "A6F",  # Frication parallel
                       "B2F", "B3F", "B4F", "B5F", "B6F",  # Frication parallel
                       "A1V", "A2V", "A3V", "A4V", "ATV",  # Voicing parallel
-                      "A1", "A2", "A3", "A4", "A5", "AN", # 1980 parallel
+                      "A1", "A2", "A3", "A4", "A5", "A6", "AB", "AN", # 1980 parallel
                       "ANV",                              # Voicing parallel
                       "SW", "INV_SAMP",                   # Synth settings
                       "N_SAMP", "FS", "DT", "VER"]        # Synth settings
@@ -406,6 +410,12 @@ class KlattSection:
         self.do()
         if self.outs is not None:
             self.process_outs()
+
+    def patch(self):
+        raise Exception("UNIMPLEMENTED: This KlattSection has no patch() implementation!")
+
+    def do(self):
+        raise Exception("UNIMPLEMENTED: This KlattSection has no do() implementation!")
 
 
 class KlattComponent:
@@ -589,7 +599,7 @@ class KlattNoise1980(KlattSection):
     def do(self):
         self.noisegen.generate()
         self.lowpass.filter()
-        self.amp.amplify(dB=-60)  # TODO: Need to figure out a real value
+        self.amp.amplify(dB=-130)  # TODO: Need to figure out a real value
 
 
 class KlattCascade1980(KlattSection):
@@ -726,12 +736,8 @@ class KlattParallel1980(KlattSection):
         self.r4 = Resonator(mast=self.mast)
         self.a5 = Amplifier(mast=self.mast)
         self.r5 = Resonator(mast=self.mast)
-        # TODO: 6th formant currently not part of self.do()! Not sure what values
-        # to give to it... need to keep reading Klatt 1980.
         self.a6 = Amplifier(mast=self.mast)
         self.r6 = Resonator(mast=self.mast)
-        # TODO: ab currently not part of self.do()! Not sure what values to give
-        # to it... need to keep reading Klatt 1980.
         self.ab = Amplifier(mast=self.mast)
         self.output_mixer = Mixer(mast=self.mast)
         self.components = [self.af, self.a1, self.r1, self.first_diff, \
@@ -781,6 +787,10 @@ class KlattParallel1980(KlattSection):
         self.a5.amplify(dB=self.mast.params["A5"])
         self.r5.resonate(ff=self.mast.params["FF"][4],
                          bw=self.mast.params["BW"][4])
+        self.a6.amplify(dB=self.mast.params["A6"])
+        self.r6.resonate(ff=self.mast.params["FF"][5],
+                         bw=self.mast.params["BW"][5])
+        self.ab.amplify(dB=self.mast.params["AB"])
         self.output_mixer.mix()
 
 
@@ -1088,7 +1098,13 @@ class Normalizer(KlattComponent):
         """
         Implements normalization.
         """
-        self.output[:] = self.input[:]/np.max(np.abs(self.input[:]))
+        abs_max = np.max(np.abs(self.input[:]))
+
+        if abs_max == 0:
+            warnings.warn("Max value was 0, skipping normalization")
+            self.output[:] = self.input[:]
+        else:
+            self.output[:] = self.input[:] / abs_max
         self.send()
 
 
@@ -1128,9 +1144,7 @@ class Switch(KlattComponent):
     """
     def __init__(self, mast):
         KlattComponent.__init__(self, mast)
-        self.output = []
-        self.output.append(np.zeros(self.mast.params["N_SAMP"]))
-        self.output.append(np.zeros(self.mast.params["N_SAMP"]))
+        self.clean()
 
     def send(self):
         """
@@ -1192,9 +1206,9 @@ if __name__ == '__main__':
     F0[:] = np.linspace(120, 70, N)  # a falling F0 contour
 
     # FF
-    target1 = np.r_[300, 1000, 2600]  # /b/
-    #target2 = np.r_[280, 2250, 2750]  # /i/
-    target2 = np.r_[750, 1300, 2600]  # /A/
+    # target1 = np.r_[300, 1000, 2600]  # /b/
+    target2 = np.r_[280, 2250, 2750]  # /i/
+    target1 = np.r_[750, 1300, 2600]  # /A/
     if 0:  # linear transition
         xfade = np.linspace(1, 0, N)
     else:  # exponential transition
@@ -1203,6 +1217,8 @@ if __name__ == '__main__':
         xfade = 2 / (1 + np.exp(scaler * n / (N-1)))
     FF[:,:3] = np.outer(xfade, target1) + np.outer((1 - xfade), target2)
 
+    print(FF.T)
+
     # synthesize
     s.params["FF"] = FF.T
     s.run()
@@ -1210,20 +1226,20 @@ if __name__ == '__main__':
     s.save('synth.wav')
 
     # visualize
-    t = np.arange(len(s.output)) / s.params['FS']
-    import matplotlib.pyplot as plt
-    ax = plt.subplot(211)
-    plt.plot(t, s.output)
-    plt.axis(ymin=-1, ymax=1)
-    plt.ylabel('amplitude')
-    plt.twinx()
-    plt.plot(t, AV, 'r', label='AV')
-    plt.plot(t, AH, 'g', label='AH')
-    plt.legend()
-    plt.subplot(212, sharex=ax)
-    plt.specgram(s.output, Fs=s.params['FS'])
-    plt.plot(t, FF, alpha=0.5)
-    plt.xlabel('time [s]')
-    plt.ylabel('frequency [Hz]')
-    plt.savefig('figure.pdf')
-    plt.show()
+    # t = np.arange(len(s.output)) / s.params['FS']
+
+    # ax = plt.subplot(211)
+    # plt.plot(t, s.output)
+    # plt.axis(ymin=-1, ymax=1)
+    # plt.ylabel('amplitude')
+    # plt.twinx()
+    # plt.plot(t, AV, 'r', label='AV')
+    # plt.plot(t, AH, 'g', label='AH')
+    # plt.legend()
+    # plt.subplot(212, sharex=ax)
+    # plt.specgram(s.output, Fs=s.params['FS'])
+    # plt.plot(t, FF, alpha=0.5)
+    # plt.xlabel('time [s]')
+    # plt.ylabel('frequency [Hz]')
+    # plt.savefig('figure.pdf')
+    # plt.show()
